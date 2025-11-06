@@ -1,6 +1,7 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import requests
 
 app = FastAPI()
 
@@ -58,11 +59,63 @@ def test_database():
         response["database"] = f"❌ Error: {str(e)[:50]}"
     
     # Check environment variables
-    import os
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
     
     return response
+
+
+@app.get("/api/answer")
+def instant_answer(q: str):
+    """Fetch a quick answer from the public DuckDuckGo Instant Answer API.
+    This is a lightweight way to pull info from the web without API keys.
+    """
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Missing query parameter 'q'")
+
+    try:
+        params = {"q": q, "format": "json", "no_redirect": 1, "no_html": 1}
+        r = requests.get("https://api.duckduckgo.com/", params=params, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+
+        answer = None
+        source_url = None
+
+        # Prefer direct answer/abstract
+        if data.get("AbstractText"):
+            answer = data.get("AbstractText")
+            source_url = data.get("AbstractURL") or data.get("AbstractSource")
+        elif data.get("Answer"):
+            answer = data.get("Answer")
+        elif data.get("Definition"):
+            answer = data.get("Definition")
+            source_url = data.get("DefinitionURL")
+        # Fallback to first related topic with text and URL
+        if not answer:
+            related = data.get("RelatedTopics") or []
+            for item in related:
+                if isinstance(item, dict):
+                    if item.get("Text") and item.get("FirstURL"):
+                        answer = item.get("Text")
+                        source_url = item.get("FirstURL")
+                        break
+                # Some entries are nested under 'Topics'
+                if isinstance(item, dict) and item.get("Topics"):
+                    for sub in item["Topics"]:
+                        if sub.get("Text") and sub.get("FirstURL"):
+                            answer = sub.get("Text")
+                            source_url = sub.get("FirstURL")
+                            break
+                    if answer:
+                        break
+
+        if not answer:
+            answer = "I couldn't find a concise answer right now. Try rephrasing or asking for a summary."
+
+        return {"answer": answer, "source_url": source_url}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lookup failed: {str(e)[:200]}")
 
 
 if __name__ == "__main__":
